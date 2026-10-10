@@ -159,4 +159,7 @@ int window_set_cursor(
     // clang-format on
 );
 
+/* Configure hardware calibration before scheduling the first frame. */
+int kms_window_set_color_calibration(struct window *window, const double gamma[3], const double gain[3]);
+
 #endif  // _FLUTTERPI_SRC_WINDOW_H

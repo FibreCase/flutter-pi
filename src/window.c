@@ -11,6 +11,7 @@
 #include "window.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 
 #include <pthread.h>
@@ -168,6 +169,7 @@ struct window {
         drmModeModeInfo *mode;
 
         bool should_apply_mode;
+        uint32_t gamma_blob_id;
 
         const struct pointer_icon *pointer_icon;
         struct cursor_buffer *cursor;
@@ -882,7 +884,56 @@ static bool kms_window_has_egl_surface(struct window *window);
 static EGLSurface kms_window_get_egl_surface(struct window *window);
 #endif
 
-static void kms_window_deinit(struct window *window);
+static int kms_window_set_color_calibration(struct window *window, const double gamma[3], const double gain[3]) {
+    const struct drm_crtc *crtc = window->kms.crtc;
+    struct drm_color_lut *lut;
+    uint32_t blob_id;
+    int ok;
+
+    if (crtc->ids.gamma_lut == UINT32_MAX || crtc->ids.gamma_lut_size == UINT32_MAX || crtc->gamma_lut_size < 2) {
+        LOG_ERROR("CRTC %u has no usable GAMMA_LUT/GAMMA_LUT_SIZE (size %llu).\n",
+            crtc->id, (unsigned long long) crtc->gamma_lut_size);
+        return ENOTSUP;
+    }
+    if (crtc->gamma_lut_size > UINT32_MAX / sizeof *lut) {
+        return EOVERFLOW;
+    }
+    lut = calloc(crtc->gamma_lut_size, sizeof *lut);
+    if (lut == NULL) {
+        return ENOMEM;
+    }
+    for (size_t i = 0; i < crtc->gamma_lut_size; i++) {
+        double x = (double) i / (crtc->gamma_lut_size - 1);
+        lut[i].red = (uint16_t) round(fmin(1.0, fmax(0.0, pow(x, gamma[0]) * gain[0])) * 65535.0);
+        lut[i].green = (uint16_t) round(fmin(1.0, fmax(0.0, pow(x, gamma[1]) * gain[1])) * 65535.0);
+        lut[i].blue = (uint16_t) round(fmin(1.0, fmax(0.0, pow(x, gamma[2]) * gain[2])) * 65535.0);
+    }
+    ok = drmModeCreatePropertyBlob(drmdev_get_fd(window->kms.drmdev), lut,
+        crtc->gamma_lut_size * sizeof *lut, &blob_id);
+    free(lut);
+    if (ok != 0) {
+        return errno;
+    }
+    /* Check atomic support before accepting this calibration. */
+    struct kms_req_builder *builder = drmdev_create_request_builder(window->kms.drmdev, crtc->id);
+    ok = builder == NULL ? ENOMEM : kms_req_builder_set_gamma_lut(builder, blob_id);
+    if (builder != NULL) {
+        kms_req_builder_unref(builder);
+    }
+    if (ok != 0) {
+        drmModeDestroyPropertyBlob(drmdev_get_fd(window->kms.drmdev), blob_id);
+        return ok;
+    }
+    if (window->kms.gamma_blob_id != 0) {
+        drmModeDestroyPropertyBlob(drmdev_get_fd(window->kms.drmdev), window->kms.gamma_blob_id);
+    }
+    window->kms.gamma_blob_id = blob_id;
+    LOG_DEBUG("CRTC %u: created gamma LUT blob %u with %llu entries.\n",
+        crtc->id, blob_id, (unsigned long long) crtc->gamma_lut_size);
+    return 0;
+}
+
+void kms_window_deinit(struct window *window);
 static int kms_window_set_cursor_locked(
     // clang-format off
     struct window *window,
@@ -1003,6 +1054,7 @@ MUST_CHECK struct window *kms_window_new(
     window->kms.crtc = selected_crtc;
     window->kms.mode = selected_mode;
     window->kms.should_apply_mode = true;
+    window->kms.gamma_blob_id = 0;
     window->kms.cursor = NULL;
     window->kms.pointer_icon = NULL;
     window->renderer_type = renderer_type;
@@ -1038,6 +1090,9 @@ fail_free_window:
 }
 
 void kms_window_deinit(struct window *window) {
+    if (window->kms.gamma_blob_id != 0) {
+        drmModeDestroyPropertyBlob(drmdev_get_fd(window->kms.drmdev), window->kms.gamma_blob_id);
+    }
     /// TODO: Do we really need to do this?
     /*
     struct kms_req_builder *builder;
@@ -1090,6 +1145,7 @@ struct frame {
     struct tracer *tracer;
     struct kms_req *req;
     bool unset_should_apply_mode_on_commit;
+    struct window *window;
 };
 
 UNUSED static void on_scanout(struct drmdev *drmdev, uint64_t vblank_ns, void *userdata) {
@@ -1115,8 +1171,13 @@ static void on_present_frame(void *userdata) {
 
     if (ok != 0) {
         LOG_ERROR("Could not commit frame request.\n");
+    } else if (frame->unset_should_apply_mode_on_commit && frame->window->kms.gamma_blob_id != 0) {
+        window_lock(frame->window);
+        frame->window->kms.should_apply_mode = false;
+        window_unlock(frame->window);
     }
 
+    window_unref(frame->window);
     tracer_unref(frame->tracer);
     kms_req_unref(frame->req);
     free(frame);
@@ -1128,6 +1189,7 @@ static void on_cancel_frame(void *userdata) {
 
     frame = userdata;
 
+    window_unref(frame->window);
     tracer_unref(frame->tracer);
     kms_req_unref(frame->req);
     free(frame);
@@ -1177,6 +1239,14 @@ static int kms_window_push_composition_locked(struct window *window, struct fl_l
         ok = kms_req_builder_set_mode(builder, window->kms.mode);
         if (ok != 0) {
             LOG_ERROR("Couldn't apply output mode.\n");
+            goto fail_unref_builder;
+        }
+    }
+
+    if (window->kms.should_apply_mode && window->kms.gamma_blob_id != 0) {
+        ok = kms_req_builder_set_gamma_lut(builder, window->kms.gamma_blob_id);
+        if (ok != 0) {
+            LOG_ERROR("Couldn't apply hardware gamma LUT: %s\n", strerror(ok));
             goto fail_unref_builder;
         }
     }
@@ -1248,6 +1318,7 @@ static int kms_window_push_composition_locked(struct window *window, struct fl_l
 
     frame->req = req;
     frame->tracer = tracer_ref(window->tracer);
+    frame->window = window_ref(window);
     frame->unset_should_apply_mode_on_commit = window->kms.should_apply_mode;
 
     frame_scheduler_present_frame(window->frame_scheduler, on_present_frame, frame, on_cancel_frame);

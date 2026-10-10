@@ -145,6 +145,10 @@ struct flutterpi_cmdline_args {
     bool dummy_display;
     struct vec2i dummy_display_size;
 
+    bool has_color_calibration;
+    double gamma[3];
+    double rgb_gain[3];
+
     bool has_drm_fd;
     int drm_fd;
 };

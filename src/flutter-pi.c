@@ -88,6 +88,8 @@ USAGE:\n\
   flutter-pi [options] <bundle path> [flutter engine options]\n\
 \n\
 OPTIONS:\n\
+  --gamma R,G,B              Hardware gamma exponents (> 0, default 1,1,1).\n\
+  --rgb-gain R,G,B           Hardware RGB gains (>= 0, default 1,1,1).\n\
   --release                  Run the app in release mode. The AOT snapshot\n\
                              of the app must be located inside the bundle directory.\n\
                              This also requires a libflutter_engine.so that was\n\
@@ -1858,6 +1860,22 @@ static bool parse_vec2i(const char *str, struct vec2i *out) {
     return true;
 }
 
+static bool parse_color_channels(const char *arg, double channels[3], bool is_gamma) {
+    char *end;
+    for (int i = 0; i < 3; i++) {
+        errno = 0;
+        double value = strtod(arg, &end);
+        if (end == arg || errno == ERANGE || !isfinite(value)
+            || (is_gamma ? value <= 0.0 : value < 0.0)
+            || (i < 2 ? *end != ',' : *end != '\0')) {
+            return false;
+        }
+        channels[i] = value;
+        arg = end + (i < 2 ? 1 : 0);
+    }
+    return true;
+}
+
 bool flutterpi_parse_cmdline_args(int argc, char **argv, struct flutterpi_cmdline_args *result_out) {
     bool finished_parsing_options;
     int runtime_mode_int = FLUTTER_RUNTIME_MODE_DEBUG;
@@ -1882,6 +1900,8 @@ bool flutterpi_parse_cmdline_args(int argc, char **argv, struct flutterpi_cmdlin
         { "videomode", required_argument, NULL, 'v' },
         { "dummy-display", no_argument, &dummy_display_int, 1 },
         { "dummy-display-size", required_argument, NULL, 's' },
+        { "gamma", required_argument, NULL, 256 },
+        { "rgb-gain", required_argument, NULL, 257 },
         { "drm-fd", required_argument, NULL, 'f' },
         { 0, 0, 0, 0 },
     };
@@ -1898,6 +1918,10 @@ bool flutterpi_parse_cmdline_args(int argc, char **argv, struct flutterpi_cmdlin
     result_out->engine_argc = 0;
     result_out->engine_argv = NULL;
     result_out->drm_fd = -1;
+    for (int i = 0; i < 3; i++) {
+        result_out->gamma[i] = 1.0;
+        result_out->rgb_gain[i] = 1.0;
+    }
 
     finished_parsing_options = false;
     while (!finished_parsing_options) {
@@ -1907,6 +1931,16 @@ bool flutterpi_parse_cmdline_args(int argc, char **argv, struct flutterpi_cmdlin
         switch (opt) {
             case 0:
                 // flag was encountered. just continue
+                break;
+
+            case 256:
+            case 257:
+                if (!parse_color_channels(optarg, opt == 256 ? result_out->gamma : result_out->rgb_gain, opt == 256)) {
+                    LOG_ERROR("Invalid --%s: expected three finite comma-separated values %s.\n",
+                        opt == 256 ? "gamma" : "rgb-gain", opt == 256 ? "> 0" : ">= 0");
+                    return false;
+                }
+                result_out->has_color_calibration = true;
                 break;
 
             case 'o':
@@ -2378,6 +2412,11 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
     }
 #endif
 
+    if (cmd_args.dummy_display && cmd_args.has_color_calibration) {
+        LOG_ERROR("Hardware color calibration requires a DRM/KMS display.\n");
+        goto fail_free_cmd_args;
+    }
+
     runtime_mode = cmd_args.has_runtime_mode ? cmd_args.runtime_mode : FLUTTER_RUNTIME_MODE_DEBUG;
     bundle_path = cmd_args.bundle_path;
     engine_argc = cmd_args.engine_argc;
@@ -2596,6 +2635,14 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
         if (window == NULL) {
             LOG_ERROR("Couldn't create KMS window.\n");
             goto fail_unref_renderer;
+        }
+    }
+
+    if (cmd_args.has_color_calibration) {
+        ok = kms_window_set_color_calibration(window, cmd_args.gamma, cmd_args.rgb_gain);
+        if (ok != 0) {
+            LOG_ERROR("Couldn't configure hardware color calibration: %s\n", strerror(ok));
+            goto fail_unref_window;
         }
     }
 

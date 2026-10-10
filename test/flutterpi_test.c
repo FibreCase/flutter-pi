@@ -1,5 +1,6 @@
 #include <flutter-pi.h>
 #include <unity.h>
+#include <stdlib.h>
 
 void setUp() {
 }
@@ -227,9 +228,35 @@ void test_parse_desired_videomode_arg() {
     expect_parsed_cmdline_args_matches(4, (char *[]){ "flutter-pi", "--videomode", "1920x1080@60", BUNDLE_PATH }, true, expected);
 }
 
+void test_parse_color_calibration() {
+    struct flutterpi_cmdline_args args;
+    TEST_ASSERT_TRUE(flutterpi_parse_cmdline_args(6,
+        (char *[]){ "flutter-pi", "--gamma", "1,0.98,1.05", "--rgb-gain", "0,1,0.95", BUNDLE_PATH }, &args));
+    TEST_ASSERT_TRUE(args.has_color_calibration);
+    TEST_ASSERT_DOUBLE_WITHIN(0.000001, 1.05, args.gamma[2]);
+    TEST_ASSERT_DOUBLE_WITHIN(0.000001, 0.95, args.rgb_gain[2]);
+    free(args.bundle_path);
+
+    const char *invalid[] = { "abc", "1,2", "1,2,3,4", "-1,1,1", "0,1,1", "nan,1,1", "inf,1,1", "1,,1", "1,1,1x", "1e999,1,1" };
+    for (unsigned i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        TEST_ASSERT_FALSE(flutterpi_parse_cmdline_args(4,
+            (char *[]){ "flutter-pi", "--gamma", (char *) invalid[i], BUNDLE_PATH }, &args));
+    }
+    TEST_ASSERT_FALSE(flutterpi_parse_cmdline_args(4,
+        (char *[]){ "flutter-pi", "--rgb-gain", "-1,1,1", BUNDLE_PATH }, &args));
+    TEST_ASSERT_TRUE(flutterpi_parse_cmdline_args(2, (char *[]){ "flutter-pi", BUNDLE_PATH }, &args));
+    TEST_ASSERT_FALSE(args.has_color_calibration);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_DOUBLE_WITHIN(0.000001, 1.0, args.gamma[i]);
+        TEST_ASSERT_DOUBLE_WITHIN(0.000001, 1.0, args.rgb_gain[i]);
+    }
+    free(args.bundle_path);
+}
+
 int main() {
     UNITY_BEGIN();
 
+    RUN_TEST(test_parse_color_calibration);
     RUN_TEST(test_parse_runtime_mode_arg);
     RUN_TEST(test_parse_orientation_arg);
     RUN_TEST(test_parse_rotation_arg);

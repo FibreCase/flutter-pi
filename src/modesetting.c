@@ -79,6 +79,8 @@ struct kms_req_builder {
     int n_layers;
     struct kms_req_layer layers[32];
 
+    uint32_t gamma_blob_id;
+    bool has_gamma_lut;
     bool unset_mode;
     bool has_mode;
     drmModeModeInfo mode;
@@ -380,6 +382,8 @@ static int fetch_crtc(int drm_fd, int crtc_index, uint32_t crtc_id, struct drm_c
     int ok;
 
     drm_crtc_prop_ids_init(&ids);
+    crtc_out->gamma_lut_size = 0;
+    crtc_out->committed_gamma_blob_id = 0;
 
     crtc = drmModeGetCrtc(drm_fd, crtc_id);
     if (crtc == NULL) {
@@ -414,6 +418,10 @@ static int fetch_crtc(int drm_fd, int crtc_index, uint32_t crtc_id, struct drm_c
         }
 
 #undef CHECK_ASSIGN_PROPERTY_ID
+
+        if (prop_info->prop_id == ids.gamma_lut_size) {
+            crtc_out->gamma_lut_size = props->prop_values[i];
+        }
 
         drmModeFreeProperty(prop_info);
         prop_info = NULL;
@@ -2322,6 +2330,8 @@ struct kms_req_builder *drmdev_create_request_builder(struct drmdev *drmdev, uin
     builder->n_layers = 0;
     builder->has_mode = false;
     builder->unset_mode = false;
+    builder->has_gamma_lut = false;
+    builder->gamma_blob_id = 0;
     return builder;
 
 fail_free_builder:
@@ -2366,6 +2376,15 @@ int kms_req_builder_set_mode(struct kms_req_builder *builder, const drmModeModeI
     ASSERT_NOT_NULL(mode);
     builder->has_mode = true;
     builder->mode = *mode;
+    return 0;
+}
+
+int kms_req_builder_set_gamma_lut(struct kms_req_builder *builder, uint32_t blob_id) {
+    if (builder->use_legacy || builder->crtc->ids.gamma_lut == UINT32_MAX) {
+        return ENOTSUP;
+    }
+    builder->has_gamma_lut = true;
+    builder->gamma_blob_id = blob_id;
     return 0;
 }
 
@@ -2933,6 +2952,16 @@ kms_req_commit_common(struct kms_req *req, bool blocking, kms_scanout_cb_t scano
             }
         }
 
+        /* Queued first frames may all request calibration. Upload only until
+         * the first successful commit; failed commits remain retryable. */
+        if (builder->has_gamma_lut && builder->gamma_blob_id != builder->crtc->committed_gamma_blob_id) {
+            if (drmModeAtomicAddProperty(builder->req, builder->crtc->id,
+                    builder->crtc->ids.gamma_lut, builder->gamma_blob_id) < 0) {
+                ok = errno;
+                goto fail_unref_builder;
+            }
+        }
+
         if (builder->connector != NULL) {
             // add the CRTC_ID property if that was explicitly set
             drmModeAtomicAddProperty(builder->req, builder->connector->id, builder->connector->ids.crtc_id, builder->crtc->id);
@@ -2987,6 +3016,10 @@ kms_req_commit_common(struct kms_req *req, bool blocking, kms_scanout_cb_t scano
         // builder->layers[i].plane->committed_state.blend_mode = builder->layers[i].layer.blend_mode;
     }
 
+    if (builder->has_gamma_lut) {
+        builder->crtc->committed_gamma_blob_id = builder->gamma_blob_id;
+    }
+
     // update struct drm_crtc.committed_state
     if (update_mode) {
         // destroy the old mode blob
@@ -3007,7 +3040,9 @@ kms_req_commit_common(struct kms_req *req, bool blocking, kms_scanout_cb_t scano
     }
 
     // update struct drm_connector.committed_state
-    builder->connector->committed_state.crtc_id = builder->crtc->id;
+    if (builder->connector != NULL) {
+        builder->connector->committed_state.crtc_id = builder->crtc->id;
+    }
     // builder->connector->committed_state.encoder_id = 0;
 
     drmdev_set_scanout_callback_locked(builder->drmdev, builder->crtc->id, scanout_cb, userdata, destroy_cb);

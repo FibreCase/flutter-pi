@@ -392,6 +392,8 @@ struct drm_crtc {
     uint8_t index;
 
     struct drm_crtc_prop_ids ids;
+    uint64_t gamma_lut_size;
+    uint32_t committed_gamma_blob_id;
 
     struct {
         bool has_mode;
@@ -789,6 +791,8 @@ int kms_req_builder_set_mode(struct kms_req_builder *builder, const drmModeModeI
  * @param builder The KMS request builder.
  * @returns Zero if successful, positive errno-style error on failure.
  */
+int kms_req_builder_set_gamma_lut(struct kms_req_builder *builder, uint32_t blob_id);
+
 int kms_req_builder_unset_mode(struct kms_req_builder *builder);
 
 /**
