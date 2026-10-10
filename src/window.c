@@ -1144,7 +1144,6 @@ static void kms_window_deinit(struct window *window) {
 struct frame {
     struct tracer *tracer;
     struct kms_req *req;
-    bool unset_should_apply_mode_on_commit;
     struct window *window;
 };
 
@@ -1171,10 +1170,6 @@ static void on_present_frame(void *userdata) {
 
     if (ok != 0) {
         LOG_ERROR("Could not commit frame request.\n");
-    } else if (frame->unset_should_apply_mode_on_commit && frame->window->kms.gamma_blob_id != 0) {
-        window_lock(frame->window);
-        frame->window->kms.should_apply_mode = false;
-        window_unlock(frame->window);
     }
 
     window_unref(frame->window);
@@ -1319,7 +1314,6 @@ static int kms_window_push_composition_locked(struct window *window, struct fl_l
     frame->req = req;
     frame->tracer = tracer_ref(window->tracer);
     frame->window = window_ref(window);
-    frame->unset_should_apply_mode_on_commit = window->kms.should_apply_mode;
 
     frame_scheduler_present_frame(window->frame_scheduler, on_present_frame, frame, on_cancel_frame);
 

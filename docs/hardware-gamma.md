@@ -50,8 +50,8 @@ visual comparison confirms the panel/driver actually uses the LUT.
   queued initialization frames do not upload it repeatedly.
 - window.c / window.h: allocate one LUT using the selected CRTC size, calculate
   `round(clamp(pow(x, gamma) * gain, 0, 1) * 65535)`, create one DRM blob,
-  and add it alongside the initial modeset. Clear the modeset flag after a
-  successful calibrated frame. Uncalibrated startup keeps its existing behavior.
+  and request it alongside the initial modeset. The commit layer omits gamma
+  properties after successful application. Startup keeps its existing mode behavior.
 - test/flutterpi_test.c: cover defaults, valid combined parameters and malformed,
   nonfinite, overflowing and out-of-range input.
 
@@ -63,9 +63,11 @@ After assignment, the kernel retains its own reference to the active blob;
 userspace destruction does not reset the display. Explicit identity parameters
 restore a linear curve. No per-frame pixel processing or LUT creation occurs.
 
-The existing modeset flag was never cleared on successful presentation. For
-calibrated windows this is now cleared after successful commit, and pending
-initial frames are deduplicated at commit time. Failed commits remain retryable.
+The existing modeset flag remains unchanged. The frame scheduler invokes the
+presentation callback synchronously while the window lock is held, so that
+callback must not lock the window again. Gamma requests are deduplicated against
+the last successfully committed blob at commit time, including queued initial
+frames. Failed commits remain retryable; normal frames do not re-upload the LUT.
 
 Validation on the development Mac is limited: CMake stops at missing libdrm,
 so a complete Linux build and actual DRM hardware verification remain required.
