@@ -884,7 +884,7 @@ static bool kms_window_has_egl_surface(struct window *window);
 static EGLSurface kms_window_get_egl_surface(struct window *window);
 #endif
 
-static int kms_window_set_color_calibration(struct window *window, const double gamma[3], const double gain[3]) {
+int kms_window_set_color_calibration(struct window *window, const double gamma[3], const double gain[3]) {
     const struct drm_crtc *crtc = window->kms.crtc;
     struct drm_color_lut *lut;
     uint32_t blob_id;
@@ -933,7 +933,7 @@ static int kms_window_set_color_calibration(struct window *window, const double 
     return 0;
 }
 
-void kms_window_deinit(struct window *window);
+static void kms_window_deinit(struct window *window);
 static int kms_window_set_cursor_locked(
     // clang-format off
     struct window *window,
@@ -1089,7 +1089,7 @@ fail_free_window:
     return NULL;
 }
 
-void kms_window_deinit(struct window *window) {
+static void kms_window_deinit(struct window *window) {
     if (window->kms.gamma_blob_id != 0) {
         drmModeDestroyPropertyBlob(drmdev_get_fd(window->kms.drmdev), window->kms.gamma_blob_id);
     }
